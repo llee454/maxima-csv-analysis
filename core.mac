@@ -1,0 +1,432 @@
+/*
+  rlwrap maxima
+  $ load ("analysis.mac")$
+*/
+load (draw)$
+load (stats)$
+load (descriptive)$
+
+numer: true$
+
+slice (min, max, xs) := rest(firstn(xs, max - 1), min - 1)$
+
+/*
+  Accepts a list of the form [xs, ys], where xs and ys are two lists
+  containing n elements; and returns [[xs0, ys0], [xs1, ys1], ...].
+*/
+zip (xss) :=
+  makelist ([xss [1][i], xss [2][i]], i, length (xss [1]))$
+
+/*
+  Represents a data field accessor.
+*/
+defstruct (field (index, transform))$
+
+/*
+  Accepts one argument: offset, a natural number that represents a
+  column offset; and returns a function that accepts a field accessor
+  and shifts the accessors' index by the given offset.
+
+  Note: this function is used to create field accessors for joined
+  tables.
+
+  Example: `getFieldValues (TU, shift (tha_width)(us_hash));`
+*/
+shift (offset) :=
+  buildq (
+    [o : offset],
+    lambda ([f],
+      new (field (f @ index + o, f @ transform))))$
+
+/*
+  Accepts two arguments: row, a matrix row; and field, a field
+  accessor; and returns the transformed value from row selected by
+  field.
+*/
+getFieldValue (field) :=
+  buildq (
+    [i: field @ index, f: field @ transform],
+    lambda ([row],
+      block ([x],
+        x: if stringp (row [i])
+          then parse_string (row [i])
+          else row [i],
+        f (x))))$
+
+/*
+  Accepts two matrices, U and T, where the first row in U and T store
+  unique record identifiers, and returns a new list of every pair of
+  rows in U and T that have the same ID.
+
+  Note: equivalent to an Inner Join of U and T on their first field.
+
+  Note: this function is slow (5 secs/100 THC rows). Use
+  `timer (joinTables)$` to collect information about the function, and
+  `timer_info ();` to view the time spent executing the function. Use
+  `untimer (joinTables)$` to stop tracking timing information.
+
+  Example: write_data (joinTables (), "join.csv");
+*/
+joinTables (U, T) :=
+  rreduce (append,
+    map (
+      lambda ([t], 
+        h : parse_string (t [tha_hashIndex])[1],
+        map (
+          lambda ([u], append (t, u)),
+            sublist (args (U),
+            lambda ([u],
+              member (h, parse_string (u [us_hashIndex]))
+            )))),
+      args (T)))$
+
+/*
+  Accepts two arguments: M, a matrix where each row represents a
+  client; and field, a field accessor; and returns a list of the 
+  transformed field values from M.
+*/
+getFieldValues (M, field) :=
+  maplist (getFieldValue (field), M)$
+
+/*
+  Accepts two arguments: M; and field, a field accessor; and
+  returns the mean value of the transformed field.
+*/
+getMeanFieldValue (M, field) :=
+  mean (getFieldValues (M, field))$
+
+/*
+  Accepts two arguments: M; and field, a field accessor; and returns
+  the sample variance of the selected field's values.
+*/
+getVarFieldValue (M, field) :=
+  var1 (getFieldValues (M, field))$
+
+/*
+  Accepts two arguments: M; and field, a field accessor; and returns
+  the sum of the values of the selected field.
+*/
+getSumFieldValues (M, field) :=
+  lsum (x, x, getFieldValues (M, field))$
+
+/*
+  Accepts two arguments: M; and field, a field accessor; and returns
+  the number of times each field value occurs in M as a list of the
+  form [xs, ns], where xs lists the observed field values and ns lists
+  the number of times the value was observed.
+*/
+countFieldValues (M, field) :=
+    discrete_freq (getFieldValues (M, field))$
+
+/*
+  Accepts two arguments: M; and field, a field accessor; and returns
+  the number of times each field occurs in M as a list of the form
+  [[x0, n0], [x1, n1], ...] where ni lists the number of times the
+  value xi was observed.
+*/
+countFieldValuesPairs (M, field) :=
+  zip (countFieldValues (M, field))$
+
+/*
+  Finds the quantile values for the selected field values.
+
+  Example: `getFieldValuesQuantiles (T, tha_numMonthsPast, 1/5);` returns
+  the quintile values for the number of months clients were past due on
+  rent.
+*/
+getFieldValuesQuantiles (M, field, threshold) :=
+  quantile (getFieldValues (M, field), threshold)$
+
+/*
+  Accepts three arguments: M; field, a field accessor; and condition, a
+  predicate function that accepts a transformed field value and returns
+  true iff the row that contains the value should be included in the
+  subsample; and returns the set of rows that satisfies the given field
+  value condition.
+*/
+getSubsample (M, field, condition) :=
+  subsample (M, lambda ([row], condition (getFieldValue (field)(row))))$
+
+/* common conditions */
+gtZero (x) := is (0 < x)$
+eqZero (x) := is (0 = x)$
+notNull (x) := is (x # 'null)$
+
+leN (n) :=
+  buildq ([m: n], lambda ([x], is (x < m)))$
+
+notEq (x) :=
+  buildq ([x], lambda ([y], is (x # y)))$
+
+getSubsampleConds (M, conditions) :=
+  block ([f],
+    f: buildq (
+         [conditions],
+         lambda ([row],
+          rreduce (
+            lambda ([condition, acc], acc and ((condition [2]) (getFieldValue (condition [1])(row)))),
+            conditions,
+            true
+        ))),
+    subsample (M, f))$
+
+getSubsampleNotNull (M, fields) :=
+  getSubsampleConds (M, map (lambda ([f], [f, notNull]), fields))$
+
+/*
+  Accepts two arguments: M; and fields, a field accessor; and returns a
+  hashed array of the form [k0 = T0, k1 = T1, .. kn = Tn], where each
+  Ti represents the subset of M for which the field selected by field
+  has the value ki.
+
+  Note: this function binds a globally visible variable named samples.
+  You must kill this variable between uses.
+
+  See: `arrayinfo` to list the array keys and `listarray` to list the
+  array values.
+
+  See: "https://stackoverflow.com/questions/
+  50886805/does-the-maxima-language-have-a-map-dictionary-data-structure
+  -and-if-it-does-ho"
+*/
+partitionSample (M, field) :=
+  block (
+    [f, samples, use_fast_arrays_orig],
+    use_fast_arrays_orig: use_fast_arrays,
+    use_fast_arrays: true,
+    f: getFieldValue (field),
+    map (
+      lambda ([row],
+        x: getFieldValue (field)(row),
+        if matrixp (samples [x])
+        then
+          block ([N],
+            N : addrow (samples [x], row),
+            samples [x] : N,
+            true)
+        else
+          block (
+            samples [x] : matrix (row),
+            true)),
+      M),
+    use_fast_arrays: use_fast_arrays_orig,
+    samples)$
+
+divn (x, n) :=
+  n * floor (x / n)$
+
+divN (n, f) :=
+  block (
+    [g],
+    g : f @ transform,
+    f @ transform: buildq ([n, g], lambda ([x], divn (g (x), n))),
+    f)$
+
+/*
+  f accepts two arguments: k, a key; and xs, the set of rows from M
+  associated with k.
+
+  Example: mapPartition (T, divN (100, tha_amountDue),
+    lambda ([k, M], [k, getMeanFieldValue (M, tha_hasEvictionCaseCOVID)]));
+*/
+mapPartition (M, field, f) :=
+  block (
+    [Xs, ks],
+    Xs: partitionSample (M, field),
+    ks: rest (arrayinfo (Xs), 2),
+    map (lambda ([k], f (k, Xs [k])), ks));
+
+/*
+  Accepts three arguments: width, a natural number; M; and field, a field
+  accessor; divides the range of field values into intervals of size width;
+  and counts returns the number of values that fall into each interval.
+
+  Specifically, this function returns a list of the form [xs, ns] where
+  xs lists the intervals and ns lists the number of values that fell
+  within each of the intervals.
+
+  Example: `countFieldValuesInIntervals (100, U, us_monthlyIncome)`
+  divides the range of observed monthly incomes into $100 intervals and
+  returns the number of clients who reported incomes falling within
+  each of these intervals.
+*/
+countFieldValuesInIntervals (width, M, field) :=
+  block (
+    [xs, lower, upper, numIntervals],
+    xs: getFieldValues (M, field),
+    lower: smin (xs),
+    upper: smax (xs),
+    numIntervals: ceiling ((upper - lower) / width),
+    continuous_freq (xs, [lower, width * numIntervals + lower, numIntervals]));
+
+fieldValuesInIntervalsPoints (width, M, field) :=
+  block ([xs],
+    xs: countFieldValuesInIntervals (width, M, field),
+    zip ([rest (xs [1], -1), xs [2]]))$
+
+plotPoints (ps, plotTitle, labelx, labely) :=
+  draw2d (
+    point_size = 1,
+    point_type = filled_circle,
+    points (ps),
+    grid = true,
+    title = plotTitle,
+    xlabel = labelx,
+    ylabel = labely,
+    yrange = [0, smax (makelist (p [2], p, ps))],
+    file_name = "tmp_plot",
+    terminal = 'svg)$
+
+plotPointsLog (ps, plotTitle, labelx, labely) :=
+  draw2d (
+    point_size = 1,
+    point_type = filled_circle,
+    points (ps),
+    grid = true,
+    title = plotTitle,
+    xlabel = labelx,
+    ylabel = labely,
+    yrange = [0, smax (makelist (p [2], p, ps))],
+    logy = true,
+    file_name = "tmp_plot",
+    terminal = 'svg)$
+
+/*
+  Accepts three fields: width, a positive real number; M; and field, a
+  field accessor; divides the range of values observed for the selected
+  field into intervals of size width; and plots the number of values
+  that fall within each interval.
+*/
+plotFieldValuesInIntervals (width, M, field, plotTitle, labelx, labely) :=
+  plotPoints (fieldValuesInIntervalsPoints (width, M, field), plotTitle, labelx, labely)$
+
+plotFieldValuesInIntervalsLog (width, M, field, plotTitle, labelx, labely) :=
+  plotPointsLog (fieldValuesInIntervalsPoints (width, M, field), plotTitle, labelx, labely)$
+
+/*
+  Accepts three arguments: threshold, a positive real number in [0, 1];
+  M; and field, a field accessor; and returns true iff the probability
+  that the sampled field values were drawn from a normal distribution
+  is greater than `1 - threshold` according to the Shapiro-Wilk test.
+
+  Note: if the number of field values is greater than 5000, this
+  function only examines the first 5000 values.
+
+  Note: this method does not appear to be very reliable. For example
+  note the variance in: `makelist (take_inference ('p_value,
+  test_normality (makelist (random_normal (0, 1), n, 5000))), m, 10);`
+*/
+fieldValuesAreNormal (threshold, M, field) :=
+  is (threshold <=
+    take_inference ('p_value,
+      test_normality (
+        firstn (getFieldValues (M, field), 5000))))$
+
+/*
+  Accepts two arguments, xs0 and xs1, two lists of sample values that
+  are the same size; and returns the correlation between xs0 and xs1.
+*/
+getCorr (xs0, xs1) :=
+  block (
+    [n, u0, u1],
+    n : length (xs0),
+    u0 : mean (xs0),
+    u1 : mean (xs1),
+    sum ((xs0 [k] - u0) * (xs1 [k] - u1), k, 1, n) /
+    ((n - 1) * std1 (xs0) * std1 (xs1))
+  )$
+
+/*
+  Accepts three values: M; and two field accessors, field0 and field1;
+  and returns the correlation between the selected field values.
+*/
+getFieldsCorr (M, field0, field1) :=
+  getCorr (
+    getFieldValues (M, field0),
+    getFieldValues (M, field1))$
+
+/*
+  Accepts two arguments: M; and fields, a list of field accessors; and
+  returns a correlation matrix that records the correlation between the
+  selected fields.
+
+  See: list_correlations, which returns the Partial Correlation Matrix
+  (a correlation matrix in which indirect correlations between
+  variables is suppressed - https://en.wikipedia.org/wiki/Covariance_matrix)
+*/
+getFieldsCorrMatrix (M, fields) :=
+  block (
+    [n],
+    n: length (fields),
+    genmatrix (
+      lambda ([i, j], getFieldsCorr (M, fields [i], fields [j])),
+      n, n
+    ));
+
+/*
+  Confidence level for a Pearson correlation measure - r.
+
+  Accepts three arguments: p, a real number that represents the
+  correlation under the null hypothesis; r, a real number that
+  represents the measured correlation; and n, a natural number that
+  represents the sample size; and returns the probability that you
+  would observe a correlation between [p, r] over a random sample of
+  size n when the actual correlation is p assuming that the
+  correlated random variables are normally distributed.
+
+  Note: generally p = 0, and we consider the observed correlation
+  significant if the result is greater than .99 or .95.
+
+  See: Hoel (1951), p. 166
+*/
+corrTestSig (p, r, n) := 
+  block (
+    [z, u, o],
+    z : 1/2 * log ((1 + r)/(1 - r)),
+    u : 1/2 * log ((1 + p)/(1 - p)),
+    s : 1/(sqrt (n - 3)),
+    erf ((z - u)/(s * sqrt (2)))
+  )$
+
+/*
+  Accepts three arguments: M; and two field accessors, field0 and
+  field1; and returns the probability that the observed linear
+  regression coefficient between the values of field0 and field1 were
+  produced at random assuming that the values are really uncorrelated
+  using the student_t distribution.
+
+  Note: for the regression coeff to be statistically significant, the
+  returned p_value should be 0.05 or less.
+
+  See: Hoel (1951), p. 279
+*/
+regTestSig (M, field0, field1) :=
+  take_inference ('p_value,
+    simple_linear_regression (
+      addcol (
+        matrix (),
+        getFieldValues (M, field0),
+        getFieldValues (M, field1))))$
+
+/*
+  Accepts three arguments: threshold, a positive real number [0, 1]; M;
+  and fields, a list of field accessors; and returns a correlation
+  matrix for the selected fields where any correlation whose p-value is
+  less than or equal to threshold is replaced with the string "NS" -
+  Not Significant.
+
+  Note: threshold should be >= .95 or .99.
+*/
+getFieldsFilteredCorrMatrix (threshold, M, fields) :=
+  block (
+    [n],
+    n : length (fields),
+    genmatrix (
+      lambda ([i, j],
+        block ([r, p],
+          r: float (abs (getFieldsCorr (M, fields [i], fields [j]))),
+          p: float (corrTestSig (0, r, length (M))),
+          if (fields [i] = fields [j]) or (threshold <= p)
+          then r
+          else "NS")),
+      n, n))$
