@@ -8,6 +8,14 @@ load (descriptive)$
 
 numer: true$
 
+compose (f, g) :=
+  buildq (
+    [f, g],
+    lambda ([x], f (g (x))))$
+
+divn (x, n) :=
+  n * floor (x / n)$
+
 slice (min, max, xs) := rest(firstn(xs, max - 1), min - 1)$
 
 /*
@@ -18,9 +26,39 @@ zip (xss) :=
   makelist ([xss [1][i], xss [2][i]], i, length (xss [1]))$
 
 /*
+  Accepts three arguments: getKey and getValue, functions; and xs, a
+  list; and returns an array `a` where for every value `x` in `xs`
+  `getValue (x)` is stored under the key `getKey (x)`.
+
+  Note: if two or more values evaluate to the same key, only the latter
+  value is retained.
+*/
+toArray (getKey, getValue, xs) :=
+  block ([samples, use_fast_arrays_orig],
+    use_fast_arrays_orig: use_fast_arrays,
+    use_fast_arrays: true,
+    map (
+      lambda ([x],
+        block ([key, value],
+          key: getKey (x),
+          value: getValue (x),
+          samples [key]: value,
+          true)),
+      xs),
+    use_fast_arrays: use_fast_arrays_orig,
+    samples)$
+  
+/*
   Represents a data field accessor.
 */
 defstruct (field (index, transform))$
+
+/*
+  Accepts a field offset and returns a new field accessor that will
+  select the field and return its value unchanged.
+*/
+at (offset) :=
+  new (field (offset, identity))$
 
 /*
   Accepts one argument: offset, a natural number that represents a
@@ -53,6 +91,28 @@ getFieldValue (field) :=
           else row [i],
         f (x))))$
 
+divN (n, f) :=
+  block (
+    [g],
+    g : f @ transform,
+    f @ transform: buildq ([n, g], lambda ([x], divn (g (x), n))),
+    f)$
+
+/*
+  Accepts a list of field accessors and returns a row transformer that
+  returns the values of the given fields as a list.
+*/
+selectFields (fields) :=
+  buildq (
+    [fields],
+    lambda ([row],
+      map (
+        lambda ([field], getFieldValue (field)(row)),
+        fields)))$
+
+/* An alias for `selectFields`. */
+select: selectFields$
+
 /*
   Accepts two matrices, U and T, where the first row in U and T store
   unique record identifiers, and returns a new list of every pair of
@@ -67,17 +127,16 @@ getFieldValue (field) :=
 
   Example: write_data (joinTables (), "join.csv");
 */
-joinTables (U, T) :=
+joinTables (T, U) :=
   rreduce (append,
     map (
       lambda ([t], 
-        h : parse_string (t [tha_hashIndex])[1],
+        h : t [1],
         map (
           lambda ([u], append (t, u)),
             sublist (args (U),
-            lambda ([u],
-              member (h, parse_string (u [us_hashIndex]))
-            )))),
+            lambda ([u], is (u [1] = h))
+            ))),
       args (T)))$
 
 /*
@@ -87,6 +146,12 @@ joinTables (U, T) :=
 */
 getFieldValues (M, field) :=
   maplist (getFieldValue (field), M)$
+
+getMinFieldValue (M, field) :=
+  smin (getFieldValues (M, field))$
+
+getMaxFieldValue (M, field) :=
+  smax (getFieldValues (M, field))$
 
 /*
   Accepts two arguments: M; and field, a field accessor; and
@@ -101,6 +166,13 @@ getMeanFieldValue (M, field) :=
 */
 getVarFieldValue (M, field) :=
   var1 (getFieldValues (M, field))$
+
+/*
+  Accepts two arguments: M; and field, a field accessor; and returns
+  the sample standard deviation of the selected field's values.
+*/
+getStdFieldValue (M, field) :=
+  std1 (getFieldValues (M, field))$
 
 /*
   Accepts two arguments: M; and field, a field accessor; and returns
@@ -153,7 +225,10 @@ eqZero (x) := is (0 = x)$
 notNull (x) := is (x # 'null)$
 
 leN (n) :=
-  buildq ([m: n], lambda ([x], is (x < m)))$
+  buildq ([n], lambda ([x], is (x <= n)))$
+
+geN (n) :=
+  buildq ([n], lambda ([x], is (n <= x)))$
 
 notEq (x) :=
   buildq ([x], lambda ([y], is (x # y)))$
@@ -174,13 +249,15 @@ getSubsampleNotNull (M, fields) :=
   getSubsampleConds (M, map (lambda ([f], [f, notNull]), fields))$
 
 /*
-  Accepts two arguments: M; and fields, a field accessor; and returns a
-  hashed array of the form [k0 = T0, k1 = T1, .. kn = Tn], where each
-  Ti represents the subset of M for which the field selected by field
-  has the value ki.
+  Accepts two arguments: M, a list of lists that are all the same size;
+  and f, a function that accepts sublists from M and returns a value;
+  and returns an array of the form [[k0, k1, ...], [p0, p1, ...]], where
+  pi is a list of rows from M for which f returned the same value, ki.
 
-  Note: this function binds a globally visible variable named samples.
-  You must kill this variable between uses.
+  This function partitions M into submatrices where every row in each
+  submatrix evaluated to the same value when passed to f.
+
+  Example: `partitionSample (M, divN (10, getFieldValue (f)))`
 
   See: `arrayinfo` to list the array keys and `listarray` to list the
   array values.
@@ -189,52 +266,74 @@ getSubsampleNotNull (M, fields) :=
   50886805/does-the-maxima-language-have-a-map-dictionary-data-structure
   -and-if-it-does-ho"
 */
-partitionSample (M, field) :=
-  block (
-    [f, samples, use_fast_arrays_orig],
+partitionSample (M, f) :=
+  block ([samples, use_fast_arrays_orig],
     use_fast_arrays_orig: use_fast_arrays,
     use_fast_arrays: true,
-    f: getFieldValue (field),
     map (
       lambda ([row],
-        x: getFieldValue (field)(row),
-        if matrixp (samples [x])
-        then
-          block ([N],
-            N : addrow (samples [x], row),
-            samples [x] : N,
-            true)
-        else
-          block (
-            samples [x] : matrix (row),
-            true)),
+        block ([x],
+          x: f (row),
+          if matrixp (samples [x])
+          then
+            block ([N],
+              N: addrow (samples [x], row),
+              samples [x]: N,
+              true)
+          else
+            block (
+              samples [x]: matrix (row),
+              true))),
       M),
     use_fast_arrays: use_fast_arrays_orig,
     samples)$
 
-divn (x, n) :=
-  n * floor (x / n)$
-
-divN (n, f) :=
-  block (
-    [g],
-    g : f @ transform,
-    f @ transform: buildq ([n, g], lambda ([x], divn (g (x), n))),
-    f)$
-
 /*
-  f accepts two arguments: k, a key; and xs, the set of rows from M
-  associated with k.
+  Accepts three arguments: M, a list of lists (rows) that all have the
+  same size; f, a function that accepts a row from M and returns a
+  value (key); and g, a function that accepts two arguments: k, a key
+  value; and row, a row from M; and returns a list of the form
+  `[g (k0, [r00, r01, ...]), g (k1, [r10, r11, ...), ...]` where all
+  rij are rows from M and f (rij) = ki for all of the rows. 
 
-  Example: mapPartition (T, divN (100, tha_amountDue),
-    lambda ([k, M], [k, getMeanFieldValue (M, tha_hasEvictionCaseCOVID)]));
+  This function partitions M into submatrices whose rows all have the
+  same value when passed to f and then maps over these submatrices
+  with g.
 */
-mapPartition (M, field, f) :=
+mapPartition (M, f, g) :=
   block (
     [Xs, ks],
-    Xs: partitionSample (M, field),
+    Xs: partitionSample (M, f),
     ks: rest (arrayinfo (Xs), 2),
-    map (lambda ([k], f (k, Xs [k])), ks));
+    map (lambda ([k], g (k, Xs [k])), ks));
+
+/*
+  Accepts two arguments: M; and fields, a field accessor; and returns a
+  hashed array of the form [k0 = T0, k1 = T1, .. kn = Tn], where each
+  Ti represents the subset of M for which the field selected by field
+  has the value ki.
+
+  Note: this function binds a globally visible variable named samples.
+  You must kill this variable between uses.
+
+*/
+partitionSampleByField (M, field) :=
+  partitionSample (M, getFieldValue (field))$
+
+/*
+  Accepts three arguments: M, a list of lists (rows) that all have the
+  same size; field, a field accessor; and f, a function that accepts
+  two arguments: k, a field value; and rows, a list of rows from M that
+  all have the same field value, k; and returns
+  `[f (k0, [r00, r01, ...]), f (k1, [r10, r11, ...]), ...]` where all
+  rij are rows from M, and getFieldValue (field)(rij) = ki.
+
+  This function partitions M into submatrices based on the value of the
+  given field and then folds over the submatrices using f.
+*/
+mapPartitionByField (M, field, f) :=
+  mapPartition (M, getFieldValue (field), f)$
+
 
 /*
   Accepts three arguments: width, a natural number; M; and field, a field
@@ -268,12 +367,13 @@ plotPoints (ps, plotTitle, labelx, labely) :=
   draw2d (
     point_size = 1,
     point_type = filled_circle,
+    points_joined = true,
     points (ps),
     grid = true,
     title = plotTitle,
     xlabel = labelx,
     ylabel = labely,
-    yrange = [0, smax (makelist (p [2], p, ps))],
+    yrange = [smin (makelist (p [2], p, ps)), smax (makelist (p [2], p, ps))],
     file_name = "tmp_plot",
     terminal = 'svg)$
 
@@ -281,12 +381,13 @@ plotPointsLog (ps, plotTitle, labelx, labely) :=
   draw2d (
     point_size = 1,
     point_type = filled_circle,
+    points_joined = true,
     points (ps),
     grid = true,
     title = plotTitle,
     xlabel = labelx,
     ylabel = labely,
-    yrange = [0, smax (makelist (p [2], p, ps))],
+    yrange = [smin (makelist (p [2], p, ps)), smax (makelist (p [2], p, ps))],
     logy = true,
     file_name = "tmp_plot",
     terminal = 'svg)$
