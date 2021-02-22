@@ -425,7 +425,8 @@ fieldValuesAreNormal (threshold, M, field) :=
 
 /*
   Accepts two arguments, xs0 and xs1, two lists of sample values that
-  are the same size; and returns the correlation between xs0 and xs1.
+  are the same size; and returns the sample correlation between xs0
+  and xs1.
 */
 getCorr (xs0, xs1) :=
   block (
@@ -471,7 +472,7 @@ getFieldsCorrMatrix (M, fields) :=
   correlation under the null hypothesis; r, a real number that
   represents the measured correlation; and n, a natural number that
   represents the sample size; and returns the probability that you
-  would observe a correlation between [p, r] over a random sample of
+  would observe a correlation between <= r over a random sample of
   size n when the actual correlation is p assuming that the
   correlated random variables are normally distributed.
 
