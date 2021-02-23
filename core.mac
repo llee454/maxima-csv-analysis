@@ -532,3 +532,57 @@ getFieldsFilteredCorrMatrix (threshold, M, fields) :=
           then r
           else "NS")),
       n, n))$
+
+/*
+  Accepts one argument: ps, a two dimensional array whose first column
+  represents the values of an independent variable and whose second
+  column represents the associated values of a dependent variable; and
+  returns the mean square error linear regression equation that fits ps. 
+*/
+getLinearRegPoints (ps) :=
+  block ([N, eqn, mse, m, k],
+    N: apply (matrix, ps),
+    eqn: y = m * x + b,
+    mse: lsquares_mse (N, [x, y], eqn),
+    [[m, b]]: lsquares_estimates_approximate (mse, [m, b]),
+    ev (eqn, m = rhs (m), b = rhs (b)))$ 
+
+/*
+  Accepts three arguments: M; xField the field accessor for the
+  independent variable; and yField, the field accessor for the
+  dependent variable; and returns the mean square error linear
+  regression equation that fits M. 
+*/
+getLinearReg (M, xField, yField) :=
+  getLinearRegPoints (
+    map (
+      lambda ([row], [
+        getFieldValue (xField)(row),
+        getFieldValue (yField)(row)]),
+      M))$
+
+/*
+  Accepts four arguments: ps, a two dimensional array whose first column
+  represents the values of an independent variable and whose second
+  column represents the associated values of a dependent variable; and
+  plots the values of the two variables along with the mean square error
+  linear regressor.
+*/
+plotPointsWithLinearReg (ps, plotTitle, labelx, labely) :=
+  block ([linearReg, M],
+    linearReg: rhs (getLinearRegPoints (ps)),
+    M: apply (matrix, ps),
+    draw2d (
+      point_size = 1,
+      point_type = filled_circle,
+      points_joined = true,
+      points (ps),
+      color = green,
+      explicit (linearReg, x, smin (M)[1], smax (M)[1]),
+      grid = true,
+      title = plotTitle,
+      xlabel = labelx,
+      ylabel = labely,
+      yrange = [smin (M)[2], smax (M)[2]],
+      file_name = "tmp_plot",
+      terminal = 'svg))$
