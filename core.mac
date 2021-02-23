@@ -540,7 +540,7 @@ getFieldsFilteredCorrMatrix (threshold, M, fields) :=
   returns the mean square error linear regression equation that fits ps. 
 */
 getLinearRegPoints (ps) :=
-  block ([N, eqn, mse, m, k],
+  block ([N, eqn, mse, m, b],
     N: apply (matrix, ps),
     eqn: y = m * x + b,
     mse: lsquares_mse (N, [x, y], eqn),
@@ -575,14 +575,31 @@ plotPointsWithLinearReg (ps, plotTitle, labelx, labely) :=
     draw2d (
       point_size = 1,
       point_type = filled_circle,
-      points_joined = true,
+      /* points_joined = true, */
       points (ps),
       color = green,
-      explicit (linearReg, x, smin (M)[1], smax (M)[1]),
+      /* explicit (linearReg, x, smin (M)[1], smax (M)[1]), */
+      explicit (linearReg, x, 0, smax (M)[1]),
       grid = true,
       title = plotTitle,
       xlabel = labelx,
       ylabel = labely,
-      yrange = [smin (M)[2], smax (M)[2]],
+      /* yrange = [smin (M)[2], smax (M)[2]], */
+      yrange = [0, smax (M)[2]],
+      xrange = [0, smax (M)[1]],
       file_name = "tmp_plot",
-      terminal = 'svg))$
+      terminal = 'png))$
+
+/*
+  Accepts one argument: ps, a two dimensional array whose first column
+  represents the values of an independent variable and whose second
+  column represents the associated values of a dependent variable; and
+  returns the square errors between the points in ps and the mean
+  square error linear regressor.
+*/
+getLinearRegErrs (ps) :=
+  block ([linearReg],
+    linearReg: rhs (getLinearRegPoints (ps)),
+    map (
+      lambda ([row], (row [2] - ev (linearReg, x = row [1]))^2),
+      ps))$
