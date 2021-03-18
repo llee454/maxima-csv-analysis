@@ -1,6 +1,6 @@
 /*
-  rlwrap maxima
-  $ load ("analysis.mac")$
+  This module defines a set of useful functions for reading and manipulating CSV
+  files.
 */
 load (draw)$
 load (stats)$
